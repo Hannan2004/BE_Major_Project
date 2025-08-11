@@ -3,6 +3,8 @@ from typing import Dict, List, Any, TypedDict, Annotated
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_cerebras import ChatCerebras
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
@@ -49,14 +51,14 @@ class CyberSecuritySystem:
         self.app = self._create_graph()
 
     def _setup_vector_store(self) -> PineconeVectorStore:
-        """Set up Pinecone vector store"""
+        "Set up Pinecone vector store"
 
         pc = Pinecone(api_key=self.pinecone_api_key)
-
+        
         try:
-            exisiting_indexes = pc.list_indexes().names()
+            existing_indexes = pc.list_indexes().names()
 
-            if self.index_name not in exisiting_indexes:
+            if self.index_name not in existing_indexes:
                 pc.create_index(
                     name=self.index_name,
                     dimension=384,
@@ -66,117 +68,39 @@ class CyberSecuritySystem:
                         region='us-east-1'
                     )
                 )
-
                 time.sleep(10)
-        except Exception as e:
-            print(f"Error setting up Pinecone index: {e}")
 
-        threat_docs = [
-            Document(
-                page_content="""
-                UNAUTHORIZED ACCESS PROTOCOL
-                
-                When unauthorized access is detected:
-                1. Immediately isolate the affected zone or system
-                2. Alert security personnel and system administrators
-                3. Review access logs for the past 24 hours
-                4. Implement temporary access restrictions
-                5. Conduct immediate security sweep of affected area
-                6. Document all actions taken for incident report
-                
-                Severity: HIGH
-                Response Time: Immediate (< 2 minutes)
-                Escalation: Security Manager, IT Director
-                """,
-                metadata={"threat_type": "unauthorized_access", "severity": "HIGH"}
-            ),
-            Document(
-                page_content="""
-                SENSOR SPOOFING RESPONSE PROTOCOL
-                
-                When sensor manipulation or spoofing is detected:
-                1. Cross-validate readings with adjacent/backup sensors
-                2. Switch to redundant sensor systems if available
-                3. Initiate manual verification procedures
-                4. Alert maintenance and security teams
-                5. Schedule immediate sensor calibration check
-                6. Implement enhanced monitoring for affected zone
-                
-                Severity: MEDIUM-HIGH
-                Response Time: Within 5 minutes
-                Escalation: Technical Operations Manager
-                """,
-                metadata={"threat_type": "sensor_spoofing", "severity": "MEDIUM"}
-            ),
-            Document(
-                page_content="""
-                NETWORK INTRUSION RESPONSE
-                
-                When network intrusion is detected:
-                1. Activate network segmentation protocols
-                2. Block suspicious IP addresses and traffic patterns
-                3. Escalate immediately to cybersecurity team
-                4. Preserve network logs for forensic analysis
-                5. Implement enhanced monitoring on all network segments
-                6. Consider temporary isolation of affected systems
-                
-                Severity: CRITICAL
-                Response Time: Immediate (< 1 minute)
-                Escalation: CISO, Security Operations Center
-                """,
-                metadata={"threat_type": "network_intrusion", "severity": "CRITICAL"}
-            ),
-            Document(
-                page_content="""
-                SMART LIGHTING SYSTEM ANOMALY PROTOCOL
-                
-                When lighting system anomalies are detected:
-                1. Switch to emergency lighting mode
-                2. Notify facilities management and security
-                3. Activate backup power systems if necessary
-                4. Ensure passenger/occupant safety protocols are active
-                5. Schedule immediate inspection of affected lighting circuits
-                6. Update system status on all monitoring dashboards
-                
-                Severity: MEDIUM
-                Response Time: Within 2 minutes
-                Escalation: Facilities Manager, Safety Officer
-                """,
-                metadata={"threat_type": "lighting_anomaly", "severity": "MEDIUM"}
-            ),
-            Document(
-                page_content="""
-                MALWARE DETECTION RESPONSE
-                
-                When malware is detected:
-                1. Immediately quarantine affected systems
-                2. Disconnect from network to prevent spread
-                3. Alert cybersecurity incident response team
-                4. Begin forensic analysis and evidence preservation
-                5. Activate backup systems and data recovery procedures
-                6. Notify stakeholders and regulatory bodies if required
-                
-                Severity: CRITICAL
-                Response Time: Immediate (< 30 seconds)
-                Escalation: CISO, Executive Leadership
-                """,
-                metadata={"threat_type": "malware", "severity": "CRITICAL"}
+            index = pc.Index(self.index_name)
+
+            stats = index.describe_index_stats()
+            if stats.total_vector_count > 0:
+                return PineconeVectorStore(
+                    index=index,
+                    embedding=self.embeddings
+                )
+
+            file_path = r"DDoS_Book.pdf" 
+            loader = PyPDFLoader(file_path)
+            documents = loader.load()
+
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=20
             )
-        ]
-
-        try:
+            docs = text_splitter.split_documents(documents)
 
             vector_store = PineconeVectorStore.from_documents(
-                documents=threat_docs,
+                documents=docs,
                 embedding=self.embeddings,
                 index_name=self.index_name
             )
-            return vector_store
-        except Exception as e:
-            print(f"Error creating Pinecone vector store: {e}")
 
+            return vector_store
+
+        except Exception as e:
+            print(f"Error setting up Pinecone vector store: {e}")
             return None
-        
+
     def _create_graph(self) -> StateGraph:
         """Create the LangGraph workflow"""
 
@@ -185,62 +109,100 @@ class CyberSecuritySystem:
         workflow.add_node("data_ingestion", self.data_ingestion_agent)
         workflow.add_node("classify_event", self.event_classification_agent)
         workflow.add_node("retrieve_intel", self.rag_agent)
-        workflow.add_node("generate_response", self.reasoning_agent)
+        workflow.add_node("reasoning", self.reasoning_agent)
+        workflow.add_node("planning", self.planning_agent)
+        workflow.add_node("plan_reflector", self.plan_reflector_agent)
         workflow.add_node("human_review", self.human_interaction_agent)
         
         workflow.set_entry_point("data_ingestion")
         workflow.add_edge("data_ingestion", "classify_event")
         workflow.add_edge("classify_event", "retrieve_intel")
-        workflow.add_edge("retrieve_intel", "generate_response")
-        workflow.add_edge("generate_response", "human_review")
-        workflow.add_edge("human_review", END)
+        workflow.add_edge("retrieve_intel", "reasoning")
+        workflow.add_edge("reasoning", "planning")
+        workflow.add_edge("planning", "plan_reflector")
+        workflow.add_conditional_edge("plan_reflector", decision, {"human_review": "human_review", "planning": "planning"})
+        workflow.add_conditional_edge("human_review", human_decision, {"approved": END, "not_approved": "planning"})
+        workflow.add_edge("planning", END)
 
         return workflow.compile()
 
   
     def data_ingestion_agent(self, state: CyberThreatState) -> CyberThreatState:
-        """Agent 1: Data Ingestion and Preprocessing"""
-        
-        alert = state["sensor_alert"]
+        """Agent 1: Data Ingestion and Preprocessing from Kafka"""
+
         timestamp = datetime.datetime.now().isoformat()
-        
-        # Extract metadata using Groq LLM
-        metadata_prompt = f"""
-        Extract metadata from this security alert:
-        Alert: {alert}
-        
-        Extract key information and respond with a structured format:
-        - Source System: The system that generated the alert
-        - Location: Physical location or zone mentioned
-        - Alert Type: Type of security event
-        - Urgency Level: Low, Medium, High, or Critical
-        
-        Keep your response concise and structured.
-        """
-        
+
         try:
-            response = self.llm.invoke(metadata_prompt)
+            consumer = KafkaConsumer(
+                'network-logs',
+                bootstrap_servers=['localhost:9092'],
+                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+                consumer_timeout_ms=5000
+            )
+
+            network_logs = []
+            for message in consumer:
+                network_logs.append(message.value)
+                if len(network_logs) >= 10:
+                    break
+            
+            consumer.close()
+
+            if not network_logs:
+                state["threat_metadata"] = {
+                    "timestamp": timestamp,
+                    "error": "No network logs found",
+                    "processed_by": "data_ingestion_agent"
+                }
+                return state
+            
+            logs_text = "\n".join([str(log) for log in network_logs])
+
+            summary_prompt = f"""
+            Analyze and summarize these network logs for potential security threats:
+        
+            Network Logs:
+            {logs_text}
+        
+            Provide a structured summary including:
+            - Total Events: Number of log entries processed
+            - Suspicious Activities: Any anomalous patterns or behaviors
+            - Source IPs: Key source IP addresses
+            - Destination IPs: Key destination IP addresses
+            - Protocols: Network protocols observed
+            - Risk Assessment: Low, Medium, High, or Critical
+            - Key Findings: Brief description of notable events
+ 
+            Keep your response concise and focused on security relevance.
+            """
+
+            response = self.llm.invoke(summary_prompt)
+
             metadata = {
-                "timestamp": timestamp,
-                "raw_alert": alert,
-                "processed_by": "data_ingestion_agent",
-                "source_system": self._extract_system_info(response.content),
-                "location": self._extract_location(alert),
-                "alert_type": self._extract_alert_type(alert),
-                "llm_analysis": response.content
+            "timestamp": timestamp,
+            "raw_logs_count": len(network_logs),
+            "processed_by": "data_ingestion_agent",
+            "source_system": "Kafka Network Logs",
+            "log_summary": response.content,
+            "sample_logs": network_logs[:3],  # Keep first 3 logs as samples
+            "risk_level": self._extract_risk_level(response.content),
+            "source_ips": self._extract_source_ips(network_logs),
+            "destination_ips": self._extract_destination_ips(network_logs)
             }
+        
         except Exception as e:
             metadata = {
                 "timestamp": timestamp,
                 "error": str(e),
-                "source_system": "Unknown",
-                "location": self._extract_location(alert),
-                "alert_type": self._extract_alert_type(alert)
+                "processed_by": "data_ingestion_agent",
+                "source_system": "Kafka Network Logs",
+                "risk_level": "Unknown"
             }
         
         state["threat_metadata"] = metadata
         state["timestamp"] = timestamp
-        state["messages"] = [{"role": "system", "content": f"Alert processed: {alert}"}]
+        state["network_logs_summary"] = metadata.get("log_summary", "No summary available")
+        state["messages"] = [{"role": "system", "content": f"Network logs processed: {len(network_logs)} entries analyzed"}]
         
         return state
     
